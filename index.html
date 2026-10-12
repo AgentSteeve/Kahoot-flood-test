@@ -66,30 +66,110 @@ const ADJ=['Dark','Void','Ghost','Neon','Iron','Rogue','Glitch','Flux','Blaze','
 const NOUN=['Wolf','Hawk','Blade','Cipher','Proxy','Specter','Vector','Viper','Wraith','Comet','Pulse','Shard','Echo','Nexus','Forge','Claw','Fang','Edge','Core','Warden'];
 function randName(){const a=ADJ[Math.floor(Math.random()*ADJ.length)];const n=NOUN[Math.floor(Math.random()*NOUN.length)];const x=Math.floor(Math.random()*999);return `${a}${n}${x}`;}
 function buildNames(count){if(mode==='numbered'){const pfx=(document.getElementById('prefix')?.value||'Bot').trim()||'Bot';return Array.from({length:count},(_,i)=>`${pfx}${i+1}`);}if(mode==='custom'){const raw=document.getElementById('customNames')?.value||'';const list=raw.split('\n').map(s=>s.trim()).filter(Boolean);if(!list.length)return Array.from({length:count},()=>randName());return Array.from({length:count},(_,i)=>list[i%list.length]);}return Array.from({length:count},()=>randName());}
+
+// ── Proxy unique (testé fonctionnel) ──────────────────────────────────────
 const PROXIES=[url=>`https://cors.eu.org/${url}`];
-async function fetchSession(pin){const target=`https://kahoot.it/reserve/session/${pin}/?${Date.now()}`;for(const proxy of PROXIES){try{const res=await fetch(proxy(target),{signal:AbortSignal.timeout(9000)});if(!res.ok)continue;const text=await res.text();const data=JSON.parse(text);if(data.token&&data.challenge!==undefined)return data;}catch(_){}}throw new Error('session introuvable — PIN valide ? Partie démarrée ?');}
-function solveChallenge(encodedToken,challenge){let offset;try{offset=(new Function('_',`return ${challenge}`))(_);}catch(e1){try{offset=(function(_){return eval(challenge);})(_);}catch(e2){const m=challenge.match(/(\d+)/g);offset=m?m.reduce((a,b)=>a*parseInt(b,10),1):1337;}}const key=String(offset);const raw=atob(encodedToken);let out='';for(let i=0;i<raw.length;i++){out+=String.fromCharCode(raw.charCodeAt(i)^key.charCodeAt(i%key.length));}return out;}
-class KahootBot{constructor(pin,wsToken,name){this.pin=pin;this.wsToken=wsToken;this.name=name;this.ws=null;this.clientId=null;this._id=1;this._joined=false;this._ka=null;}
-_nextId(){return String(this._id++);}
-_send(obj){if(this.ws?.readyState===WebSocket.OPEN)this.ws.send(JSON.stringify([obj]));}
-connect(){return new Promise((resolve,reject)=>{const url=`wss://kahoot.it/cometd/${this.pin}/${this.wsToken}`;try{this.ws=new WebSocket(url);}catch(e){reject(e);return;}
-const timer=setTimeout(()=>{this.ws.close();reject(new Error('timeout connexion'));},14000);
-this.ws.onopen=()=>{this._send({channel:'/meta/handshake',version:'1.0',minimumVersion:'1.0',supportedConnectionTypes:['websocket','long-polling','callback-polling'],id:this._nextId(),ext:{ack:false,timesync:{tc:Date.now(),l:0,o:0}},advice:{timeout:60000,interval:0}});};
-this.ws.onmessage=(ev)=>{let msgs;try{msgs=JSON.parse(ev.data);}catch{return;}
-for(const m of msgs){
-if(m.channel==='/meta/handshake'&&m.successful){this.clientId=m.clientId;this._send({channel:'/meta/connect',connectionType:'websocket',clientId:this.clientId,id:this._nextId(),advice:{timeout:0}});this._send({channel:'/meta/subscribe',subscription:'/service/player',clientId:this.clientId,id:this._nextId()});this._send({channel:'/meta/subscribe',subscription:'/service/status',clientId:this.clientId,id:this._nextId()});}
-if(m.channel==='/meta/connect'&&m.successful&&!this._joined){this._joined=true;this._send({channel:'/service/controller',clientId:this.clientId,id:this._nextId(),data:{type:'login',gameid:String(this.pin),host:'kahoot.it',name:this.name,content:JSON.stringify({device:{userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',screen:{width:1920,height:1080}}})}});clearTimeout(timer);this._ka=setInterval(()=>{this._send({channel:'/meta/connect',connectionType:'websocket',clientId:this.clientId,id:this._nextId()});},25000);resolve(this);}
-if(m.channel==='/meta/connect'&&!m.successful){this.ws.close();}}};
-this.ws.onerror=()=>{clearTimeout(timer);reject(new Error('ws erreur'));};
-this.ws.onclose=()=>{clearInterval(this._ka);clearTimeout(timer);if(!this._joined)reject(new Error('connexion fermée'));};});}
-disconnect(){clearInterval(this._ka);this.ws?.close();}}
-async function flood(){const pin=document.getElementById('pin').value.trim().replace(/\D/g,'');const count=parseInt($range.value,10);if(!pin){log('✖ PIN manquant','err');return;}
-bots.forEach(b=>b.disconnect());bots=[];stats={ok:0,err:0,pend:0};$log.innerHTML='';running=true;refreshStats();setBtn('stop');
-log(`→ pin ${pin} — ${count} bots`,'info');log(`→ récupération session…`,'info');
-let wsToken;try{const sess=await fetchSession(pin);wsToken=solveChallenge(sess.token,sess.challenge);log(`✓ token décodé`,'ok');}catch(e){log(`✖ ${e.message}`,'err');setBtn('start');running=false;return;}
-const names=buildNames(count);const delay=count>100?120:count>50?80:count>20?50:30;log(`→ spawn ${count} bots — intervalle ${delay} ms`,'info');
-for(let i=0;i<count;i++){if(!running)break;stats.pend++;refreshStats();const bot=new KahootBot(pin,wsToken,names[i]);bots.push(bot);bot.connect().then(()=>{stats.ok++;stats.pend=Math.max(0,stats.pend-1);log(`✓ ${bot.name}`,'ok');refreshStats();}).catch(e=>{stats.err++;stats.pend=Math.max(0,stats.pend-1);log(`✖ ${bot.name} — ${e.message}`,'err');refreshStats();});await sleep(delay);}
-await sleep(4000);log(`─ flood terminé — ${stats.ok} connectés · ${stats.err} erreurs`,stats.ok>0?'ok':'warn');refreshStats();if(running){setBtn('start');running=false;}}
+
+async function fetchSession(pin){
+  const target=`https://kahoot.it/reserve/session/${pin}/`;
+  for(const proxy of PROXIES){
+    const full=proxy(target);
+    try{
+      log(`→ ${new URL(full).host}`, 'info');
+      const res=await fetch(full,{signal:AbortSignal.timeout(12000)});
+      const text=await res.text();
+      if(!res.ok){log(`✖ proxy status ${res.status} — ${text.slice(0,80)}`, 'err');continue;}
+      let data;
+      try{data=JSON.parse(text);}catch(e){log(`✖ réponse non-JSON — ${text.slice(0,80)}`, 'err');continue;}
+      if(data.token&&data.challenge!==undefined)return data;
+      log(`✖ réponse sans token — ${text.slice(0,80)}`, 'err');
+    }catch(e){
+      log(`✖ ${e.name||'erreur'} — ${e.message||e}`, 'err');
+    }
+  }
+  throw new Error('session introuvable — voir lignes au-dessus');
+}
+
+function solveChallenge(encodedToken,challenge){
+  let offset;
+  try{offset=(new Function('_',`return ${challenge}`))(_);}
+  catch(e1){try{offset=(function(_){return eval(challenge);})(_);}
+  catch(e2){const m=challenge.match(/(\d+)/g);offset=m?m.reduce((a,b)=>a*parseInt(b,10),1):1337;}}
+  const key=String(offset);const raw=atob(encodedToken);let out='';
+  for(let i=0;i<raw.length;i++){out+=String.fromCharCode(raw.charCodeAt(i)^key.charCodeAt(i%key.length));}
+  return out;
+}
+
+class KahootBot{
+  constructor(pin,wsToken,name){this.pin=pin;this.wsToken=wsToken;this.name=name;this.ws=null;this.clientId=null;this._id=1;this._joined=false;this._ka=null;}
+  _nextId(){return String(this._id++);}
+  _send(obj){if(this.ws?.readyState===WebSocket.OPEN)this.ws.send(JSON.stringify([obj]));}
+  connect(){
+    return new Promise((resolve,reject)=>{
+      const url=`wss://kahoot.it/cometd/${this.pin}/${this.wsToken}`;
+      try{this.ws=new WebSocket(url);}catch(e){reject(e);return;}
+      const timer=setTimeout(()=>{this.ws.close();reject(new Error('timeout connexion'));},14000);
+      this.ws.onopen=()=>{this._send({channel:'/meta/handshake',version:'1.0',minimumVersion:'1.0',supportedConnectionTypes:['websocket','long-polling','callback-polling'],id:this._nextId(),ext:{ack:false,timesync:{tc:Date.now(),l:0,o:0}},advice:{timeout:60000,interval:0}});};
+      this.ws.onmessage=(ev)=>{
+        let msgs;try{msgs=JSON.parse(ev.data);}catch{return;}
+        for(const m of msgs){
+          if(m.channel==='/meta/handshake'&&m.successful){
+            this.clientId=m.clientId;
+            this._send({channel:'/meta/connect',connectionType:'websocket',clientId:this.clientId,id:this._nextId(),advice:{timeout:0}});
+            this._send({channel:'/meta/subscribe',subscription:'/service/player',clientId:this.clientId,id:this._nextId()});
+            this._send({channel:'/meta/subscribe',subscription:'/service/status',clientId:this.clientId,id:this._nextId()});
+          }
+          if(m.channel==='/meta/connect'&&m.successful&&!this._joined){
+            this._joined=true;
+            this._send({channel:'/service/controller',clientId:this.clientId,id:this._nextId(),data:{type:'login',gameid:String(this.pin),host:'kahoot.it',name:this.name,content:JSON.stringify({device:{userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',screen:{width:1920,height:1080}}})}});
+            clearTimeout(timer);
+            this._ka=setInterval(()=>{this._send({channel:'/meta/connect',connectionType:'websocket',clientId:this.clientId,id:this._nextId()});},25000);
+            resolve(this);
+          }
+          if(m.channel==='/meta/connect'&&!m.successful){this.ws.close();}
+        }
+      };
+      this.ws.onerror=()=>{clearTimeout(timer);reject(new Error('ws erreur'));};
+      this.ws.onclose=()=>{clearInterval(this._ka);clearTimeout(timer);if(!this._joined)reject(new Error('connexion fermée'));};
+    });
+  }
+  disconnect(){clearInterval(this._ka);this.ws?.close();}
+}
+
+async function flood(){
+  const pin=document.getElementById('pin').value.trim().replace(/\D/g,'');
+  const count=parseInt($range.value,10);
+  if(!pin){log('✖ PIN manquant','err');return;}
+  bots.forEach(b=>b.disconnect());bots=[];
+  stats={ok:0,err:0,pend:0};$log.innerHTML='';running=true;refreshStats();setBtn('stop');
+  log(`→ pin ${pin} — ${count} bots`,'info');
+  log(`→ récupération session…`,'info');
+  let wsToken;
+  try{
+    const sess=await fetchSession(pin);
+    wsToken=solveChallenge(sess.token,sess.challenge);
+    log(`✓ token décodé`,'ok');
+  }catch(e){
+    log(`✖ ${e.message}`,'err');
+    setBtn('start');running=false;return;
+  }
+  const names=buildNames(count);
+  const delay=count>100?120:count>50?80:count>20?50:30;
+  log(`→ spawn ${count} bots — intervalle ${delay} ms`,'info');
+  for(let i=0;i<count;i++){
+    if(!running)break;
+    stats.pend++;refreshStats();
+    const bot=new KahootBot(pin,wsToken,names[i]);
+    bots.push(bot);
+    bot.connect().then(()=>{stats.ok++;stats.pend=Math.max(0,stats.pend-1);log(`✓ ${bot.name}`,'ok');refreshStats();})
+    .catch(e=>{stats.err++;stats.pend=Math.max(0,stats.pend-1);log(`✖ ${bot.name} — ${e.message}`,'err');refreshStats();});
+    await sleep(delay);
+  }
+  await sleep(4000);
+  log(`─ flood terminé — ${stats.ok} connectés · ${stats.err} erreurs`,stats.ok>0?'ok':'warn');
+  refreshStats();
+  if(running){setBtn('start');running=false;}
+}
 function stopFlood(){running=false;bots.forEach(b=>b.disconnect());bots=[];log('⏹ flood stoppé','warn');setBtn('start');refreshStats();}
 function setBtn(state){const btn=document.getElementById('startBtn');if(state==='stop'){btn.textContent='⏹ Stopper le flood';btn.classList.add('stop');}else{btn.textContent='⚡ Lancer le flood';btn.classList.remove('stop');}}
 document.getElementById('startBtn').addEventListener('click',()=>{if(running)stopFlood();else flood();});
